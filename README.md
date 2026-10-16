@@ -5,8 +5,20 @@ wired two-gate setup, now being turned into a modular system with radio links be
 
 ## Status
 
-Step 1: 1:1 port of the original Arduino IDE sketch (two wired light barriers, 16x2 LCD) to a CLion/PlatformIO
-project for the Arduino Nano 33 IoT.
+Step 1: The original Arduino IDE sketch (two wired light barriers, 16x2 LCD) is ported to a CLion/PlatformIO
+project for the Arduino Nano 33 IoT and rewritten as clean, hardware-independent C++.
+
+## Structure
+
+| File | Purpose |
+|------|---------|
+| `include/config.h` | Pins, timings, display geometry |
+| `LightBarrier` | Reads one gate, reports each new interruption exactly once (edge detection) |
+| `SprintTimer` | State machine (idle, running, finished), pure logic without hardware access |
+| `PulseLed` | Non-blocking LED pulse |
+| `SprintDisplay` | 16x2 LCD output, throttled and only writes changed lines |
+| `TimeFormat` | Integer-only formatting of durations |
+| `src/main.cpp` | Wires the parts together |
 
 ## Roadmap
 

@@ -1,65 +1,88 @@
+/**
+ * @file main.cpp
+ * @brief SprintGate: Sprintzeitmessung mit zwei Lichtschranken.
+ *
+ * Diese Datei verbindet nur die Bausteine:
+ *   LightBarrier -> SprintTimer -> SprintDisplay / PulseLed / Serial
+ *
+ * Ablauf eines Schleifendurchlaufs:
+ *   1. Zeitstempel nehmen, bevor irgendetwas Langsames passiert.
+ *   2. Beide Lichtschranken abfragen.
+ *   3. Auslösungen an den Zeitgeber weitergeben.
+ *   4. LEDs, Display und serielle Ausgabe bedienen.
+ */
 #include <Arduino.h>
-#include <LiquidCrystal.h>
 
+#include "LightBarrier.h"
+#include "PulseLed.h"
+#include "SprintDisplay.h"
+#include "SprintTimer.h"
+#include "TimeFormat.h"
 #include "config.h"
 
-LiquidCrystal lcd(pins::kLcdRs, pins::kLcdEn, pins::kLcdD4, pins::kLcdD5, pins::kLcdD6, pins::kLcdD7);
+namespace {
 
-// State of the current run
-unsigned long startMs = 0;
-unsigned long endMs = 0;       // 0 = run is still active
-unsigned long durationMs = 0;
-bool resultPrinted = false;
+LightBarrier startGate(config::pins::kGateStart, config::kGateInputMode,
+                       config::kGateActiveLevel);
+LightBarrier finishGate(config::pins::kGateFinish, config::kGateInputMode,
+                        config::kGateActiveLevel);
 
-void showTime(unsigned long ms) {
-  lcd.setCursor(0, 0);
-  lcd.print("Dauer:");
-  lcd.setCursor(0, 1);
-  lcd.print(ms / 1000.0, 3);
-  lcd.print(" s");
+PulseLed startLed(config::pins::kLedStart, config::timing::kLedPulseUs);
+PulseLed finishLed(config::pins::kLedFinish, config::timing::kLedPulseUs);
+
+SprintTimer timer(config::timing::kRearmLockoutUs);
+
+SprintDisplay display(config::pins::kLcdRs, config::pins::kLcdEnable,
+                      config::pins::kLcdData4, config::pins::kLcdData5,
+                      config::pins::kLcdData6, config::pins::kLcdData7);
+
+/// Gibt die gemessene Zeit einmalig über die serielle Schnittstelle aus.
+void printResult(uint32_t durationUs) {
+  char seconds[16];
+  formatSeconds(durationUs, seconds, sizeof(seconds));
+  Serial.println(seconds);
 }
 
-void setup() {
-  pinMode(pins::kGateStart, INPUT);
-  pinMode(pins::kGateEnd, INPUT);
-  pinMode(pins::kLedStart, OUTPUT);
-  pinMode(pins::kLedEnd, OUTPUT);
+}  // namespace
 
-  lcd.begin(16, 2);
-  Serial.begin(kSerialBaud);
+void setup() {
+  startGate.begin();
+  finishGate.begin();
+  startLed.begin();
+  finishLed.begin();
+
+  display.begin();
+  display.update(timer, micros(), true);
+
+  Serial.begin(config::kSerialBaud);
 }
 
 void loop() {
-  const unsigned long now = millis();
+  // Zeitstempel zuerst nehmen. Display- und LED-Zugriffe kosten Zeit und
+  // dürfen die Messung nicht verfälschen.
+  const uint32_t nowUs = micros();
 
-  // Start gate: new run, but only after the re-arm delay
-  if (digitalRead(pins::kGateStart) == LOW && (now - endMs) > kRearmDelayMs) {
-    startMs = now;
-    durationMs = 0;
-    endMs = 0;
-    resultPrinted = false;
-    lcd.setCursor(5, 1);
-    lcd.print("   ");
-    digitalWrite(pins::kLedStart, HIGH);
-  }
-  if ((now - startMs) > kLedPulseMs) digitalWrite(pins::kLedStart, LOW);
+  const bool startTriggered = startGate.pollTrigger();
+  const bool finishTriggered = finishGate.pollTrigger();
 
-  // Finish gate: stop the run (only once)
-  if (digitalRead(pins::kGateEnd) == LOW && endMs == 0) {
-    endMs = now;
-    durationMs = endMs - startMs;
-    digitalWrite(pins::kLedEnd, HIGH);
-  }
-  if ((now - endMs) > kLedPulseMs) digitalWrite(pins::kLedEnd, LOW);
+  bool stateChanged = false;
 
-  // Display and serial output
-  if (endMs == 0) {
-    showTime(now - startMs);
-  } else {
-    showTime(durationMs);
-    if (!resultPrinted) {
-      Serial.println(durationMs / 1000.0, 3);
-      resultPrinted = true;
-    }
+  // Start vor Ziel auswerten, damit die Reihenfolge auch bei gleichzeitiger
+  // Auslösung logisch bleibt.
+  if (startTriggered && timer.handleStartTrigger(nowUs)) {
+    startLed.trigger(nowUs);
+    stateChanged = true;
   }
+
+  if (finishTriggered && timer.handleFinishTrigger(nowUs)) {
+    finishLed.trigger(nowUs);
+    printResult(timer.elapsedUs(nowUs));
+    stateChanged = true;
+  }
+
+  startLed.update(nowUs);
+  finishLed.update(nowUs);
+
+  // Bei Zustandswechsel sofort aktualisieren, sonst im festen Takt.
+  display.update(timer, nowUs, stateChanged);
 }
